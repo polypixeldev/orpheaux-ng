@@ -93,11 +93,25 @@ Requestor: ${song.user}`
         ]
     })
 })
-app.command('/play', async ({ ack, command, respond, say, body }) => {
-    await ack();
-    if (!command.text) return await respond("Please provide a YouTube URL or Video ID.")
-    const url = command.text.split(" ")[0].trim()
 
+let queue = [];
+
+async function queueNextSong(respond, say, body, command) {
+    if (queue.length === 0) return;
+    const client = await createClient({
+        url: `redis://:${process.env.REDIS_PASSWORD}@${process.env.REDIS_HOST || "127.0.0.1"}:${process.env.REDIS_PORT || 6379}`
+
+    })
+        .on('error', err => console.log('Redis Client Error', err))
+        .connect();
+
+    setTimeout(async () => {
+        let currentId = queue.shift()
+        await playVideo(respond, say, body, command, `https://www.youtube.com/watch?v=${currentId}`);
+    }, client.get("songEnd"));
+}
+
+async function playVideo(respond, say, body, command, url) {
     var metadata
     try {
         metadata = await ytDlpWrap.getVideoInfo(
@@ -129,6 +143,7 @@ app.command('/play', async ({ ack, command, respond, say, body }) => {
             } catch (e) {
                 await respond("Failed to query video. Please try again.")
             }
+            queueNextSong(respond, say, body, command)
             await say({
                 "blocks": [
                     {
@@ -154,9 +169,32 @@ Requested by: <@${command.user_id}>`
                     },
                 ]
             })
+            
 
 
         })
+}
+
+app.command('/play', async ({ ack, command, respond, say, body }) => {
+    await ack();
+    if (!command.text) return await respond("Please provide a YouTube URL or Video ID.")
+    const urlString = command.text.split(" ")[0].trim()
+    const url = new URL(urlString)
+
+    if (url.pathname === "/watch") {
+        playVideo(respond, say, body, command, urlString);
+    } else if (url.pathname === "/playlist") {
+        let playlistOut = await ytDlpWrap.execPromise([
+            '-flat-playlist',
+            '--print',
+            'id',
+            url.searchParams.get("list")
+        ])
+        let ids = playlistOut.trim().split("\n")
+        await respond(`Playing ${ids.length} from the playlist.`);
+        queue.push(...ids)
+        await playVideo(respond, say, body, command, `https://www.youtube.com/watch?v=${queue.shift()}`);
+    }
 });
 
 app.command('/stop', async ({ ack, respond, body, say }) => {
